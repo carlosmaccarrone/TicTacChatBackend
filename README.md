@@ -1,3 +1,5 @@
+[![Node.js CI](https://github.com/carlosmaccarrone/TicTacChatBackend/actions/workflows/ci.yml/badge.svg)](https://github.com/carlosmaccarrone/TicTacChatBackend/actions/workflows/ci.yml)
+
 # TicTacChat Backend 🚀
 
 Backend server for **TicTacChat**, a real-time chat with Tic-Tac-Toe games using **Socket.IO** and Node.js.
