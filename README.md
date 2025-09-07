@@ -24,7 +24,7 @@ This backend handles:
 Clone the repo and install dependencies:
 
 ```bash
-git clone <repo-url>
+git clone https://github.com/carlosmaccarrone/TicTacChatBackend.git
 cd TicTacChatBackend
 npm install
 ```
