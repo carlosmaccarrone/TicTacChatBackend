@@ -70,6 +70,11 @@ function removeUser(nickname) {
   console.log(`[REMOVE USER] ${nickname} (${socketId})`);
 }
 
+function resetChallengeMessages(challenge) {
+  if (!challenge) return;
+  challenge.messages = [];
+}
+
 // ---------------- SOCKET ----------------
 io.on('connection', (socket) => {
   console.log('New socket connected:', socket.id);
@@ -182,36 +187,48 @@ io.on('connection', (socket) => {
         by: answerNickname,
       });
 
+      resetChallengeMessages(challenge);
       removeChallenge(challenge);
       return;
     }
-
-    const sockets = {
-      [challenge.challenger]: usersByNick.get(challenge.challenger),
-      [challenge.challenged]: usersByNick.get(challenge.challenged),
-    };
-
-    Object.entries(sockets).forEach(([nick, sockId]) => {
-      if (!sockId) {
-        return;
-      }
-
-      const payload = {
-        board: challenge.board,
-        turn: challenge.turn,
-        opponent: nick === challenge.challenger ? challenge.challenged : challenge.challenger,
-        mySymbol: challenge.symbols[nick === challenge.challenger ? 'challenger' : 'challenged'],
+    
+    if (accepted) {
+      resetChallengeMessages(challenge);
+      const newChallenge = {
+        challenger: challenge.challenger,
+        challenged: challenge.challenged,
+        board: Array(9).fill(null),
+        turn: challenge.symbols.challenger, // o lógica de primer turno
+        symbols: challenge.symbols,
+        winner: null,
+        messages: []
       };
 
-      io.to(sockId).emit('pvp:start', payload);
+      const sockets = {
+        [newChallenge.challenger]: usersByNick.get(newChallenge.challenger),
+        [newChallenge.challenged]: usersByNick.get(newChallenge.challenged),
+      };
 
-      challengesByPlayer.set(challenge.challenger, challenge);
-      challengesByPlayer.set(challenge.challenged, challenge);      
-    });
+      Object.entries(sockets).forEach(([nick, sockId]) => {
+        if (!sockId) return;
 
-    console.log(`[LOG] Challenge accepted: ${challenge.challenger} vs ${challenge.challenged}`);
+        const payload = {
+          board: newChallenge.board,
+          turn: newChallenge.turn,
+          opponent: nick === newChallenge.challenger ? newChallenge.challenged : newChallenge.challenger,
+          mySymbol: newChallenge.symbols[nick === newChallenge.challenger ? 'challenger' : 'challenged'],
+        };
+
+        io.to(sockId).emit('pvp:start', payload);
+
+        // Guardar la referencia nueva, limpia
+        challengesByPlayer.set(newChallenge.challenger, newChallenge);
+        challengesByPlayer.set(newChallenge.challenged, newChallenge);
+      });
+
+      console.log(`[LOG] Challenge accepted: ${newChallenge.challenger} vs ${newChallenge.challenged}`);
+    }
   });
-
 
   // ---------------- PvP ----------------
   socket.on('pvp:move', ({ index, symbol }) => {
@@ -309,56 +326,70 @@ io.on('connection', (socket) => {
     challenge.lastWinner = winner || null; // 'X' | 'O' | 'draw' | null
   });
 
-socket.on('pvp:leaveRoom', ({ symbol }) => {
-  const leavingPlayer = symbol; // aquí debe ser el nickname real
-  const challenge = challengesByPlayer.get(leavingPlayer);
+  socket.on('pvp:leaveRoom', ({ nickname, voluntary }) => {
+    if (!nickname) return;
 
-  if (!challenge) {
-    // No estaba en ningún challenge, igual lo ponemos idle
-    usersStatus.set(leavingPlayer, 'idle');
-    return;
-  }
+    const challenge = challengesByPlayer.get(nickname);
 
-  const { challenger, challenged } = challenge;
-  const otherPlayer = leavingPlayer === challenger ? challenged : challenger;
+    if (!challenge) {
+      // No estaba en ningún challenge, igual lo ponemos idle
+      usersStatus.set(nickname, 'idle');
+      broadcastUserList();
+      return;
+    }
 
-  // Marcar ambos jugadores como idle
-  usersStatus.set(leavingPlayer, 'idle');
-  usersStatus.set(otherPlayer, 'idle');
+    const { challenger, challenged } = challenge;
+    const otherPlayer = nickname === challenger ? challenged : challenger;
 
-  // Emitir a ambos que vuelvan al lobby
-  const leavingSocket = usersByNick.get(leavingPlayer);
-  const otherSocket = usersByNick.get(otherPlayer);
+    // Marcar ambos como idle
+    usersStatus.set(nickname, 'idle');
+    usersStatus.set(otherPlayer, 'idle');
 
-  if (leavingSocket) leavingSocket.emit('pvp:forceLobby');
-  if (otherSocket) otherSocket.emit('pvp:forceLobby');
+    // Emitir a ambos que vuelvan al lobby
+    const socketIdLeaving = usersByNick.get(nickname);
+    if (!voluntary) {
+      usersByNick.delete(nickname);
+      nickBySocket.delete(socketIdLeaving);
+      usersStatus.delete(nickname);
+    }
+    const socketIdOther = usersByNick.get(otherPlayer);
 
-  // Limpiar challenge y activeChallenges
-  challengesByPlayer.delete(leavingPlayer);
-  challengesByPlayer.delete(otherPlayer);
-  activeChallenges.delete(`${challenger}:${challenged}`);
-  activeChallenges.delete(`${challenged}:${challenger}`);
+    if (socketIdLeaving) io.to(socketIdLeaving).emit('pvp:forceLobby');
+    if (socketIdOther) io.to(socketIdOther).emit('pvp:forceLobby');
 
-  // Actualizar lista de usuarios a todos los clientes conectados
-  broadcastUserList();
-});
+    // Limpiar mensajes privados de este challenge
+    resetChallengeMessages(challenge);
+
+    // Limpiar challenge
+    challengesByPlayer.delete(nickname);
+    challengesByPlayer.delete(otherPlayer);
+    activeChallenges.delete(`${challenger}:${challenged}`);
+    activeChallenges.delete(`${challenged}:${challenger}`);
+
+    broadcastUserList();
+    console.log(`[SERVER] ${nickname} y ${otherPlayer} volvieron al lobby`);
+  });
 
 
 
   // ---------------- PvP: Mensajes privados ----------------
-  socket.on('pvp:message', ({ text }) => {
+  socket.on('pvp:message', ({ to, text }) => {
     const from = nickBySocket.get(socket.id);
     if (!from) return;
 
-    const challenge = getChallenge(from);
-    if (!challenge) return;
-
-    const to = challenge.challenger === from ? challenge.challenged : challenge.challenger;
     const targetSocketId = usersByNick.get(to);
     if (!targetSocketId) return;
 
-    challenge.messages.push({ from, text, timestamp: Date.now() });
+    // Guardar en challenge
+    const challenge = getChallenge(from);
+    if (challenge) {
+      challenge.messages.push({ from, to, text, timestamp: Date.now() });
+    }
+
+    // Emitir a oponente
     io.to(targetSocketId).emit('pvp:message', { from, text });
+
+    // Emitir al mismo socket para que vea su propio mensaje (opcional)
     socket.emit('pvp:message', { from, text });
   });
 
