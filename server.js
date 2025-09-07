@@ -33,7 +33,7 @@ setInterval(() => {
 
 // ---------------- CHALLENGES ----------------
 const activeChallenges = new Map(); 
-// clave = 'player1:player2', valor = { challenger, challenged, board, turn, symbols, winner, messages, timeoutId }
+// clave = 'player1:player2', valor = { challenger, challenged, board, turn, symbols, winner, messages }
 
 function getChallenge(nickname) {
   return Array.from(activeChallenges.values())
@@ -42,7 +42,6 @@ function getChallenge(nickname) {
 
 function removeChallenge(challenge) {
   if (!challenge) return;
-  clearTimeout(challenge.timeoutId);
   activeChallenges.delete(`${challenge.challenger}:${challenge.challenged}`);
   activeChallenges.delete(`${challenge.challenged}:${challenge.challenger}`);
   usersStatus.set(challenge.challenger, 'idle');
@@ -128,11 +127,6 @@ io.on('connection', (socket) => {
 
     const challengeId = `${fromNickname}:${toNickname}`;
     const reverseId = `${toNickname}:${fromNickname}`;
-    const timeoutId = setTimeout(() => {
-      const challenge = activeChallenges.get(challengeId);
-      removeChallenge(challenge);
-      io.to(usersByNick.get(toNickname)).emit('challenge:timeout', { from: fromNickname });
-    }, 10000);
 
     const symbols = Math.random() < 0.5
       ? { challenger: 'X', challenged: 'O' }
@@ -145,8 +139,7 @@ io.on('connection', (socket) => {
       turn: symbols.challenger,
       symbols,
       winner: null,
-      messages: [],
-      timeoutId,
+      messages: []
     };
 
     activeChallenges.set(challengeId, challengeObj);
@@ -163,48 +156,43 @@ io.on('connection', (socket) => {
 
   socket.on('challenge:response', ({ accepted }) => {
     const answerNickname = nickBySocket.get(socket.id);
-    console.log('[LOG] challenge:response triggered');
-    console.log('Socket ID:', socket.id);
-    console.log('Nickname answering:', answerNickname);
-    console.log('Accepted:', accepted);
 
-    if (!answerNickname) {
-      console.log('[LOG] No nickname found for this socket. Aborting.');
-      return;
-    }
+    if (!answerNickname) return;
 
     const challenge = getChallenge(answerNickname);
-    console.log('[LOG] Retrieved challenge:', challenge);
 
-    if (!challenge) {
-      console.log('[LOG] No active challenge found for', answerNickname);
-      return;
-    }
-
-    console.log('[LOG] Clearing challenge timeout:', challenge.timeoutId);
-    clearTimeout(challenge.timeoutId);
+    if (!challenge) return;
 
     if (!accepted) {
-      console.log('[LOG] Challenge rejected. Removing challenge...');
+      const other =
+        challenge.challenger === answerNickname
+          ? challenge.challenged
+          : challenge.challenger;
+
+      const otherSocket = usersByNick.get(other);
+      if (otherSocket) {
+        io.to(otherSocket).emit('challenge:closed', {
+          reason: 'declined',
+          by: answerNickname,
+        });
+      }
+
+      io.to(socket.id).emit('challenge:closed', {
+        reason: 'self-declined',
+        by: answerNickname,
+      });
+
       removeChallenge(challenge);
       return;
     }
 
-    // Emitir inicio de PvP a ambos correctamente
     const sockets = {
       [challenge.challenger]: usersByNick.get(challenge.challenger),
       [challenge.challenged]: usersByNick.get(challenge.challenged),
     };
 
-    console.log('[LOG] Sockets to emit pvp:start:', sockets);
-    console.log('[LOG] Challenge symbols:', challenge.symbols);
-
     Object.entries(sockets).forEach(([nick, sockId]) => {
-      console.log('[LOG] Processing nickname:', nick);
-      console.log('Socket ID for', nick, ':', sockId);
-
       if (!sockId) {
-        console.log('[LOG] No socket ID for', nick, 'skipping emit');
         return;
       }
 
@@ -215,7 +203,6 @@ io.on('connection', (socket) => {
         mySymbol: challenge.symbols[nick === challenge.challenger ? 'challenger' : 'challenged'],
       };
 
-      console.log('[LOG] Emitting pvp:start payload to', nick, ':', payload);
       io.to(sockId).emit('pvp:start', payload);
 
       challengesByPlayer.set(challenge.challenger, challenge);
@@ -332,7 +319,7 @@ socket.on('pvp:leaveRoom', ({ symbol }) => {
     return;
   }
 
-  const { challenger, challenged, timeoutId } = challenge;
+  const { challenger, challenged } = challenge;
   const otherPlayer = leavingPlayer === challenger ? challenged : challenger;
 
   // Marcar ambos jugadores como idle
@@ -351,9 +338,6 @@ socket.on('pvp:leaveRoom', ({ symbol }) => {
   challengesByPlayer.delete(otherPlayer);
   activeChallenges.delete(`${challenger}:${challenged}`);
   activeChallenges.delete(`${challenged}:${challenger}`);
-
-  // Limpiar timeout si existía
-  if (timeoutId) clearTimeout(timeoutId);
 
   // Actualizar lista de usuarios a todos los clientes conectados
   broadcastUserList();
